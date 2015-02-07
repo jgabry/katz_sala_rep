@@ -1,0 +1,118 @@
+---
+output: pdf_document
+---
+
+02/07/2015
+
+
+## Packages
+```{r, packages, message=FALSE}
+library(foreign)
+library(survival)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(plyr)
+```
+
+## Functions
+```{r, functions}
+# Function to run the cox model for a single congress and return hazards
+get_haz <- function(Xvalues, Cong) {
+  # Xvalues = values of the covariates at which to predict
+  # Cong = congress number
+  
+  fit <- coxph(Surv(cumtenure, censordum) ~ seniority + dem + privileged,
+               data = subset(com_subset, congno == Cong), 
+               ties = "breslow") # maybe use ties = exact?
+  
+  S <- survfit(fit, # set newdata to 0s to get baselines? 
+               newdata = data.frame(seniority = 0, dem = 0, privileged = 0))
+  
+  # baseline hazards = -log(survival)
+  H_0 <- -log(S$surv) 
+  
+  # exp{linear predictor}
+  exp_Xbeta <- predict(fit, newdata = Xvalues, type = "risk") 
+  
+  # hazard rates
+  hazard <- H_0 * exp_Xbeta 
+  if (length(hazard) < 9) hazard <- c(hazard, rep(NA, 9 - length(hazard)))
+  
+  hazard
+  }
+
+# Function to plot hazards
+plot_haz <- function(haz_mat, vlines, ymax, title) {
+  # haz_mat = matrix of hazards (congnos x durations)
+  # vlines = congnos for ausballot, revolt, realign
+  # ymax = upper limit for y-axis
+  
+  plot_data <- melt(haz_mat, varnames = c("Congress","Duration"))
+  
+  gg_haz <- ggplot(plot_data, aes(x = Congress, y = value, color = Duration)) + 
+    ylab("Hazard") +
+    geom_vline(xintercept = vlines, linetype = 2) + 
+    geom_line() +
+    scale_y_continuous(limits = c(0, ymax)) +
+    ggtitle(paste(title, "\n")) +
+    theme_classic() %+replace% theme(axis.line = element_line(size = 3),
+                                     legend.position = "bottom")
+  gg_haz
+  }
+```
+
+## Data
+```{r, data}
+com <- read.dta('katz_sala.dta')
+com$censordum <- 1 - com$censordum
+
+keep_vars <- c("censordum", "cumtenure", "seniority", "pctreturned", "ch_pty_control", 
+               "dem", "privileged", "realign", "revolt", "ausballot", "congno")
+
+# take subset of original data
+com_subset <- subset(com, subset = cumtenure <= 9 & congno < 71, select = keep_vars)
+```
+
+## Computations
+```{r, coxph}
+# get mean values of the predictors for each congress 
+X_by_cong <- ddply(com_subset, "congno", summarise,
+                   seniority = mean(seniority), dem = mean(dem), 
+                   privileged = mean(privileged))
+head(X_by_cong, 5)
+X_by_cong <- X_by_cong[,-1]
+
+# get grand means of the predictors 
+X_all <- apply(com_subset[, c("seniority", "dem", "privileged")], 2, mean)
+X_all <- data.frame(t(X_all))
+print(X_all, row.names = FALSE)
+
+# matrices to store results
+congnos <- sort(unique(com_subset$congno))
+haz <- haz_all <- mat.or.vec(nr = length(congnos), nc = 9)
+rownames(haz) <- rownames(haz_all) <- congnos
+colnames(haz) <- colnames(haz_all) <- paste(1:9, "terms")
+
+# run model for each congress and return estimated hazards
+for (c in seq_along(congnos)) {
+  haz[c, ] <- get_haz(Xvalues = X_by_cong[c, ], Cong = congnos[c])
+  haz_all[c, ] <- get_haz(Xvalues = X_all, Cong = congnos[c])
+  }
+```
+
+
+## Plots
+```{r, plots, fig.height = 6, fig.width = 8, warning=FALSE}
+markers <- c("ausballot", "revolt", "realign")
+markers <- with(com_subset, sapply(markers, function(x) min(congno[get(x) == 1])))
+
+ymax <- max(haz[,1:6], haz_all[,1:6], na.rm = TRUE)
+gg_haz <- plot_haz(haz[,1:6], vlines = markers, ymax = ymax, 
+                   title = "X = by-congress means")
+gg_haz_all <- plot_haz(haz_all[,1:6], vlines = markers, ymax = ymax, 
+                       title = "X = overall means")
+
+grid.arrange(gg_haz, gg_haz_all, nrow = 2)
+```
+
